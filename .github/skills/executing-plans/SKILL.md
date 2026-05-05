@@ -54,6 +54,6 @@ After all tasks complete and verified:
 
 ## Related Skills
 
-- **using-git-worktrees** - Set up isolated workspace before starting
+- **using-git-worktrees** - Ensures isolated workspace (creates one or verifies existing)
 - **writing-plans** - Creates the plan this skill executes
 - **finishing-a-development-branch** - Complete development after all tasks
