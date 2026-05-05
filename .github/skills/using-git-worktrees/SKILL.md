@@ -1,57 +1,79 @@
 ---
 name: using-git-worktrees
-description: Use when starting feature work that needs isolation from current workspace or before executing implementation plans - creates isolated git worktrees with smart directory selection and safety verification
+description: Use when starting feature work that needs isolation from current workspace or before executing implementation plans - detects existing isolation first, then creates a manual git worktree only when needed
 ---
 
 # Using Git Worktrees
 
 ## Overview
 
-Git worktrees create isolated workspaces sharing the same repository, allowing work on multiple branches simultaneously without switching.
+Ensure work happens in an isolated workspace. Detect existing isolation first; only create a new worktree when needed.
 
-**Core principle:** Systematic directory selection + safety verification = reliable isolation.
+**Core principle:** Detect existing isolation -> Ask consent -> Create only if needed -> Verify clean baseline.
 
 **Announce at start:** "I'm using the using-git-worktrees skill to set up an isolated workspace."
 
-## Directory Selection Process
+## Step 0: Detect Existing Isolation
 
-Follow this priority order:
-
-### 1. Check Existing Directories
+**Before creating anything, check if you are already in an isolated workspace.**
 
 ```bash
-# Check in priority order
-ls -d .worktrees 2>/dev/null     # Preferred (hidden)
-ls -d worktrees 2>/dev/null      # Alternative
+GIT_DIR=$(cd "$(git rev-parse --git-dir)" 2>/dev/null && pwd -P)
+GIT_COMMON=$(cd "$(git rev-parse --git-common-dir)" 2>/dev/null && pwd -P)
+BRANCH=$(git branch --show-current)
 ```
 
-**If found:** Use that directory. If both exist, `.worktrees` wins.
-
-### 2. Check Project Instructions
+**Submodule guard:** `GIT_DIR != GIT_COMMON` is also true inside git submodules. Before concluding "already in a worktree," verify you are not in a submodule:
 
 ```bash
-# Check copilot-instructions.md or CLAUDE.md for worktree preferences
-grep -i "worktree.*director" .github/copilot-instructions.md 2>/dev/null
+# If this returns a path, you're in a submodule, not a worktree -- treat as normal repo
+git rev-parse --show-superproject-working-tree 2>/dev/null
 ```
 
-**If preference specified:** Use it without asking.
+**If `GIT_DIR != GIT_COMMON` (and not a submodule):** You are already in a linked worktree. Skip to Step 2 (Project Setup). Do NOT create another worktree.
 
-### 3. Ask User
+Report with branch state:
+- On a branch: "Already in isolated workspace at `<path>` on branch `<name>`."
+- Detached HEAD: "Already in isolated workspace at `<path>` (detached HEAD, externally managed). Branch creation needed at finish time."
 
-If no directory exists and no preference found:
+**If `GIT_DIR == GIT_COMMON` (or in a submodule):** You are in a normal repo checkout.
 
-```
-No worktree directory found. Where should I create worktrees?
+Has the user already indicated their worktree preference in your instructions (`copilot-instructions.md` or similar)? If not, ask for consent before creating a worktree:
 
-1. .worktrees/ (project-local, hidden)
-2. ~/worktrees/<project-name>/ (global location)
+> "Would you like me to set up an isolated worktree? It protects your current branch from changes."
 
-Which would you prefer?
-```
+Honor any existing declared preference without asking. If the user declines consent, work in place and skip to Step 2.
 
-## Safety Verification
+## Step 1: Create Worktree
 
-### For Project-Local Directories
+GitHub Copilot Agent Mode has no native worktree tool, so create the worktree manually using git.
+
+### 1a. Directory Selection
+
+Follow this priority order. Explicit user preference always beats observed filesystem state.
+
+1. **Check your instructions for a declared worktree directory preference.** If the user has already specified one (in `copilot-instructions.md` or related config), use it without asking.
+   ```bash
+   grep -i "worktree.*director" .github/copilot-instructions.md 2>/dev/null
+   ```
+
+2. **Check for an existing project-local worktree directory:**
+   ```bash
+   ls -d .worktrees 2>/dev/null     # Preferred (hidden)
+   ls -d worktrees 2>/dev/null      # Alternative
+   ```
+   If found, use it. If both exist, `.worktrees` wins.
+
+3. **Check for an existing global directory:**
+   ```bash
+   project=$(basename "$(git rev-parse --show-toplevel)")
+   ls -d ~/worktrees/$project 2>/dev/null
+   ```
+   If found, use it.
+
+4. **If there is no other guidance available**, default to `.worktrees/` at the project root.
+
+### 1b. Safety Verification (project-local directories only)
 
 **MUST verify directory is ignored before creating worktree:**
 
@@ -59,31 +81,28 @@ Which would you prefer?
 git check-ignore -q .worktrees 2>/dev/null || git check-ignore -q worktrees 2>/dev/null
 ```
 
-**If NOT ignored:**
-1. Add appropriate line to .gitignore
-2. Commit the change
-3. Proceed with worktree creation
+**If NOT ignored:** Add to .gitignore, commit the change, then proceed.
 
-### For Global Directory
+**Why critical:** Prevents accidentally committing worktree contents to repository.
 
-No .gitignore verification needed - outside project entirely.
+Global directories (`~/worktrees/`) need no verification.
 
-## Creation Steps
-
-### 1. Detect Project Name
+### 1c. Create the Worktree
 
 ```bash
 project=$(basename "$(git rev-parse --show-toplevel)")
-```
 
-### 2. Create Worktree
+# Determine path based on chosen location
+# For project-local: path="$LOCATION/$BRANCH_NAME"
+# For global:        path="~/worktrees/$project/$BRANCH_NAME"
 
-```bash
 git worktree add "$path" -b "$BRANCH_NAME"
 cd "$path"
 ```
 
-### 3. Run Project Setup
+**Sandbox fallback:** If `git worktree add` fails with a permission error (e.g. workspace trust / sandbox denial), tell the user the environment blocked worktree creation and you're working in the current directory instead. Then run setup and baseline tests in place.
+
+## Step 2: Project Setup
 
 Auto-detect and run appropriate setup:
 
@@ -102,11 +121,20 @@ if [ -f pyproject.toml ]; then poetry install; fi
 if [ -f go.mod ]; then go mod download; fi
 ```
 
-### 4. Verify Clean Baseline
+## Step 3: Verify Clean Baseline
 
-Run tests to ensure worktree starts clean. If tests fail, report and ask whether to proceed.
+Run tests to ensure workspace starts clean:
 
-### 5. Report Location
+```bash
+# Use project-appropriate command
+npm test / cargo test / pytest / go test ./...
+```
+
+**If tests fail:** Report failures, ask whether to proceed or investigate.
+
+**If tests pass:** Report ready.
+
+### Report
 
 ```
 Worktree ready at <full-path>
@@ -118,24 +146,58 @@ Ready to implement <feature-name>
 
 | Situation | Action |
 |-----------|--------|
+| Already in linked worktree | Skip creation (Step 0) |
+| In a submodule | Treat as normal repo (Step 0 guard) |
+| Normal repo, user declines consent | Work in place, skip to Step 2 |
 | `.worktrees/` exists | Use it (verify ignored) |
 | `worktrees/` exists | Use it (verify ignored) |
 | Both exist | Use `.worktrees/` |
-| Neither exists | Check project instructions -> Ask user |
+| Neither exists | Check instructions, then default `.worktrees/` |
 | Directory not ignored | Add to .gitignore + commit |
+| Permission error on create | Sandbox fallback, work in place |
 | Tests fail during baseline | Report failures + ask |
 | No package.json/Cargo.toml | Skip dependency install |
+
+## Common Mistakes
+
+### Skipping detection
+
+- **Problem:** Creating a nested worktree inside an existing one
+- **Fix:** Always run Step 0 before creating anything
+
+### Confusing submodule with worktree
+
+- **Problem:** `GIT_DIR != GIT_COMMON` is true in submodules too
+- **Fix:** Run the submodule guard in Step 0 before concluding isolation exists
+
+### Skipping ignore verification
+
+- **Problem:** Worktree contents get tracked, pollute git status
+- **Fix:** Always use `git check-ignore` before creating project-local worktree
+
+### Assuming directory location
+
+- **Problem:** Creates inconsistency, violates project conventions
+- **Fix:** Follow priority: instruction file > existing project-local > existing global > default
+
+### Proceeding with failing tests
+
+- **Problem:** Can't distinguish new bugs from pre-existing issues
+- **Fix:** Report failures, get explicit permission to proceed
 
 ## Red Flags
 
 **Never:**
+- Create a worktree when Step 0 detects existing isolation
+- Skip the submodule guard
 - Create worktree without verifying it's ignored (project-local)
 - Skip baseline test verification
 - Proceed with failing tests without asking
-- Assume directory location when ambiguous
 
 **Always:**
-- Follow directory priority: existing > project instructions > ask
+- Run Step 0 detection first
+- Ask consent before creating a worktree (unless preference already declared)
+- Follow directory priority: instruction file > existing > default
 - Verify directory is ignored for project-local
 - Auto-detect and run project setup
 - Verify clean test baseline
